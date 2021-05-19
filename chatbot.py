@@ -3,8 +3,9 @@
 # Original Python code by Ignacio Cases (@cases)
 ######################################################################
 import util
-
 import numpy as np
+import re
+from porter_stemmer import PorterStemmer
 
 
 # noinspection PyMethodMayBeStatic
@@ -14,22 +15,32 @@ class Chatbot:
     def __init__(self, creative=False):
         # The chatbot's default name is `moviebot`.
         # TODO: Give your chatbot a new name.
-        self.name = 'test'
+        self.name = 'name'
 
         self.creative = creative
+        self.stemmer = PorterStemmer()
+        self.negation = ["not", "didn't", "no", "don't", "never", "can't"]
+        self.punctuation = [".",",","!",":",";","but","yet"]
+        self.pos_words = ["ador","enjoi","admir","prefer","appreci","fanci","pleas","pleasur"]
+        self.neg_words = ["loath","dispis","disapprov"]
+        self.min_num_of_movies = 5
+        self.num_ratings = 0
 
         # This matrix has the following shape: num_movies x num_users
         # The values stored in each row i and column j is the rating for
         # movie i by user j
         self.titles, ratings = util.load_ratings('data/ratings.txt')
         self.sentiment = util.load_sentiment_dictionary('data/sentiment.txt')
+        
 
         ########################################################################
         # TODO: Binarize the movie ratings matrix.                             #
         ########################################################################
 
         # Binarize the movie ratings before storing the binarized matrix.
-        self.ratings = ratings
+        self.ratings = self.binarize(ratings)
+        self.user_ratings = np.zeros(np.shape(self.ratings)[0])
+
         ########################################################################
         #                             END OF YOUR CODE                         #
         ########################################################################
@@ -96,10 +107,46 @@ class Chatbot:
         # directly based on how modular it is, we highly recommended writing   #
         # code in a modular fashion to make it easier to improve and debug.    #
         ########################################################################
+
         if self.creative:
             response = "I processed {} in creative mode!!".format(line)
         else:
-            response = "I processed {} in starter mode!!".format(line)
+            title = self.extract_titles(line)
+            if len(title) > 1:
+                return "one movie only"
+            elif len(title) == 0:
+                return "pls put movie in quotes"
+            
+            movies = self.find_movies_by_title(title[0])
+            if len(movies) > 1:
+                return "more than 1 movie, pls specify"
+            elif len(movies) == 0:
+                return "can't find movie in database, try another"
+            
+            sentiment = self.extract_sentiment(str(line))
+            
+            if sentiment == 1:
+                response = "Ok, you liked {}!".format(title[0])
+                self.user_ratings[movies[0]] = sentiment
+                self.num_ratings += 1
+            elif sentiment == -1:
+                response = "So you didn't like {}.".format(title[0])
+                self.user_ratings[movies[0]] = sentiment
+                self.num_ratings += 1
+            elif sentiment == 0:
+                return "idk if you liked {}. Tell me more about it".format(title[0])
+            else:
+                return "Sorry, I didn't get that. Tell me about a movie you've watched"
+
+            if self.num_ratings >= self.min_num_of_movies:
+                response +=  " can make a recommendation now"
+                recommendation = self.recommend(self.user_ratings, self.ratings).pop(0)
+                response += " I suggest you watch \"{}\".".format(self.titles[recommendation][0])
+                response += " want another?"
+            else:
+                response += " tell me another"
+            
+           
 
         ########################################################################
         #                          END OF YOUR CODE                            #
@@ -158,7 +205,12 @@ class Chatbot:
         pre-processed with preprocess()
         :returns: list of movie titles that are potentially in the text
         """
-        return []
+        if self.creative:
+            result = []
+        else:
+            result = re.findall('"([^"]*)"', preprocessed_input)
+
+        return result
 
     def find_movies_by_title(self, title):
         """ Given a movie title, return a list of indices of matching movies.
@@ -168,8 +220,7 @@ class Chatbot:
         - If multiple movies are found that match the given title, return a list
         containing all of the indices of these matching movies.
         - If exactly one movie is found that matches the given title, return a
-        list
-        that contains the index of that matching movie.
+        list that contains the index of that matching movie.
 
         Example:
           ids = chatbot.find_movies_by_title('Titanic')
@@ -178,7 +229,31 @@ class Chatbot:
         :param title: a string containing a movie title
         :returns: a list of indices of matching movies
         """
-        return []
+        has_date = False
+        pattern = "^(An|A|The)?\s?(.+?)\s?(\((?:\d+)\))?$"
+        m = re.search(pattern, title)
+        processed_title = m.group(2)
+
+        if m.group(1) != None:
+            processed_title += ", " + m.group(1)
+
+        if m.group(3) != None:
+            has_date = True
+            date = m.group(3)
+
+        index = []
+
+        for i in range(len(self.titles)):
+            movie = self.titles[i][0]
+            m2 = re.search("(.+?)(?:\s(\((?:\d+)\)))?$", movie)       
+            if processed_title == m2.group(1):
+                if has_date:
+                    if m2.group(2) != None and date == m2.group(2):
+                        index.append(i)
+                else:
+                    index.append(i)
+
+        return index
 
     def extract_sentiment(self, preprocessed_input):
         """Extract a sentiment rating from a line of pre-processed text.
@@ -200,7 +275,39 @@ class Chatbot:
         pre-processed with preprocess()
         :returns: a numerical value for the sentiment of the text
         """
-        return 0
+        score = 0
+        processed_input = re.sub('"([^"]*)"', "[movie]", preprocessed_input).split()
+        
+        negation_on = False
+        for i in range(len(processed_input)):
+            cur_word = processed_input[i].lower()
+
+            if cur_word in self.negation:
+                negation_on = True
+            if cur_word in self.punctuation:
+                negation_on = False
+            
+            if not cur_word in self.sentiment:
+                cur_word = self.stemmer.stem(cur_word)
+
+            if (cur_word in self.sentiment and self.sentiment[cur_word] == 'neg') or cur_word in self.neg_words:
+                if negation_on: 
+                    score += 1
+                else:
+                    score -= 1
+            elif (cur_word in self.sentiment and self.sentiment[cur_word] == 'pos') or cur_word in self.pos_words:
+                if negation_on: 
+                    score -= 1
+                else:
+                    score += 1
+            
+        if score > 0:
+            return 1
+        elif score < 0:
+            return -1
+        else:
+            return 0
+ 
 
     def extract_sentiment_for_movies(self, preprocessed_input):
         """Creative Feature: Extracts the sentiments from a line of
@@ -308,7 +415,9 @@ class Chatbot:
         # The starter code returns a new matrix shaped like ratings but full of
         # zeros.
         binarized_ratings = np.zeros_like(ratings)
-
+        binarized_ratings[ratings > threshold] = 1
+        binarized_ratings[ratings <= threshold] = -1
+        binarized_ratings[ratings == 0] = 0
         ########################################################################
         #                        END OF YOUR CODE                              #
         ########################################################################
@@ -327,7 +436,7 @@ class Chatbot:
         ########################################################################
         # TODO: Compute cosine similarity between the two vectors.             #
         ########################################################################
-        similarity = 0
+        similarity = np.dot(u, v)/(np.linalg.norm(u) * np.linalg.norm(v))
         ########################################################################
         #                          END OF YOUR CODE                            #
         ########################################################################
@@ -370,7 +479,26 @@ class Chatbot:
         ########################################################################
 
         # Populate this list with k movie indices to recommend to the user.
+
         recommendations = []
+        pred_ratings = []
+        
+        rated_movies = np.where(user_ratings != 0)[0]
+
+        for movie in range(len(ratings_matrix)):
+            if not movie in rated_movies:
+                score = 0
+                if ratings_matrix[movie].any():
+                    for rated_movie in rated_movies:
+                        score += user_ratings[rated_movie] * self.similarity(ratings_matrix[movie], ratings_matrix[rated_movie])
+                    pred_ratings.append((movie, score))
+                else:
+                    pred_ratings.append((movie, 0.0))
+        
+        pred_ratings.sort(key = lambda x: x[1], reverse=True)
+        
+        for i in range(k):
+            recommendations.append(pred_ratings[i][0])
 
         ########################################################################
         #                        END OF YOUR CODE                              #
